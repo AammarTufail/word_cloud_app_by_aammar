@@ -1,106 +1,122 @@
 import streamlit as st
+import pandas as pd
+import numpy as np
 from wordcloud import WordCloud, STOPWORDS
 import matplotlib.pyplot as plt
-import pandas as pd
-from docx import Document
-from pdfminer.high_level import extract_text
-import io
+import PyPDF2
+from docx import Document  
+import plotly.express as px
+import base64
+from io import BytesIO
 
-st.set_option('deprecation.showPyplotGlobalUse', False)
-
+# Functions for file reading
 def read_txt(file):
     return file.getvalue().decode("utf-8")
 
 def read_docx(file):
-    doc = Document(io.BytesIO(file.read()))
-    return ' '.join([p.text for p in doc.paragraphs])
+    doc = Document(file)
+    return " ".join([para.text for para in doc.paragraphs])
 
 def read_pdf(file):
-    return extract_text(io.BytesIO(file.read()))
+    pdf = PyPDF2.PdfReader(file)
+    return " ".join([page.extract_text() for page in pdf.pages])
 
-st.title("Sadi Word Cloud di app")
+# Function to filter out stopwords
+def filter_stopwords(text, additional_stopwords=[]):
+    words = text.split()
+    all_stopwords = STOPWORDS.union(set(additional_stopwords))
+    filtered_words = [word for word in words if word.lower() not in all_stopwords]
+    return " ".join(filtered_words)
 
-uploaded_files = st.file_uploader("Choose a file", type=['txt', 'pdf', 'docx'], accept_multiple_files=True)
+# Function to create download link for plot
+def get_image_download_link(buffered, format_):
+    image_base64 = base64.b64encode(buffered.getvalue()).decode()
+    return f'<a href="data:image/{format_};base64,{image_base64}" download="wordcloud.{format_}">Download Plot as {format_}</a>'
 
-# Sidebar for customization
-st.sidebar.header("Customization Options")
-width = st.sidebar.slider("Width of Word Cloud", 400, 2000, 800)
-height = st.sidebar.slider("Height of Word Cloud", 400, 2000, 800)
-resolution = st.sidebar.slider("Resolution (DPI)", 50, 300, 100)
-formats = ["PNG", "JPEG", "SVG"]
-file_format = st.sidebar.selectbox("Select File Format", formats)
+# Function to generate a download link for a DataFrame
+def get_table_download_link(df, filename, file_label):
+    csv = df.to_csv(index=False)
+    b64 = base64.b64encode(csv.encode()).decode()
+    return f'<a href="data:file/csv;base64,{b64}" download="{filename}">{file_label}</a>'
 
-if uploaded_files:
-    combined_text = ''
-    for file in uploaded_files:
-        if '.txt' in file.name:
-            combined_text += read_txt(file)
-        elif '.docx' in file.name:
-            combined_text += read_docx(file)
-        elif '.pdf' in file.name:
-            combined_text += read_pdf(file)
+# Streamlit code
+st.title("Word Cloud Generator")
+st.subheader("📁 Upload a pdf, docx or text file to generate a word cloud")
 
-    stop_words = set(STOPWORDS)
+uploaded_file = st.file_uploader("Choose a file", type=["txt", "pdf", "docx"])
+st.set_option('deprecation.showPyplotGlobalUse', False)
 
-    if st.checkbox("Remove Stopwords"):
-        wordcloud = WordCloud(stopwords=stop_words, width=width, height=height).generate(combined_text)
+if uploaded_file:
+    file_details = {"FileName": uploaded_file.name, "FileType": uploaded_file.type, "FileSize": uploaded_file.size}
+    st.write(file_details)
+
+    # Check the file type and read the file
+    if uploaded_file.type == "text/plain":
+        text = read_txt(uploaded_file)
+    elif uploaded_file.type == "application/pdf":
+        text = read_pdf(uploaded_file)
+    elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        text = read_docx(uploaded_file)
     else:
-        wordcloud = WordCloud(width=width, height=height).generate(combined_text)
+        st.write("This file type is not supported yet.")
+        text = ""
 
-    word_freq = pd.DataFrame(wordcloud.process_text(combined_text).items(), columns=["Word", "Frequency"]).sort_values(by="Frequency", ascending=False)
+    # Generate word count table
+    words = text.split()
+    word_count = pd.DataFrame({'Word': words}).groupby('Word').size().reset_index(name='Count').sort_values('Count', ascending=False)
 
-    additional_stop_words = st.multiselect("Select additional stopwords:", word_freq["Word"][:50].tolist())
+    # Sidebar: Checkbox and Multiselect box for stopwords
+    use_standard_stopwords = st.sidebar.checkbox("Use standard stopwords?", True)
+    top_words = word_count['Word'].head(50).tolist()
+    additional_stopwords = st.sidebar.multiselect("Additional stopwords:", sorted(top_words))
+
+    if use_standard_stopwords:
+        all_stopwords = STOPWORDS.union(set(additional_stopwords))
+    else:
+        all_stopwords = set(additional_stopwords)
+
+    text = filter_stopwords(text, all_stopwords)
+
+    if text:
+        # Word Cloud dimensions
+        width = st.sidebar.slider("Select Word Cloud Width", 400, 2000, 1200, 50)
+        height = st.sidebar.slider("Select Word Cloud Height", 200, 2000, 800, 50)
+
+        # Generate wordcloud
+        st.subheader("Generated Word Cloud")
+        fig, ax = plt.subplots(figsize=(width/100, height/100))  # Convert pixels to inches for figsize
+        wordcloud_img = WordCloud(width=width, height=height, background_color='white', max_words=200, contour_width=3, contour_color='steelblue').generate(text)
+        ax.imshow(wordcloud_img, interpolation='bilinear')
+        ax.axis('off')
+
+        # Save plot functionality
+        format_ = st.selectbox("Select file format to save the plot", ["png", "jpeg", "svg", "pdf"])
+        resolution = st.slider("Select Resolution", 100, 500, 300, 50)
+        # Generate word count table
+        st.subheader("Word Count Table")
+        words = text.split()
+        word_count = pd.DataFrame({'Word': words}).groupby('Word').size().reset_index(name='Count').sort_values('Count', ascending=False)
+        st.write(word_count)
+    st.pyplot(fig)
+    if st.button(f"Save as {format_}"):
+        buffered = BytesIO()
+        plt.savefig(buffered, format=format_, dpi=resolution)
+        st.markdown(get_image_download_link(buffered, format_), unsafe_allow_html=True)
     
-    if additional_stop_words:
-        stop_words.update(additional_stop_words)
-        wordcloud = WordCloud(stopwords=stop_words, width=width, height=height).generate(combined_text)
     
-    plt.figure(figsize=(width/100, height/100), dpi=resolution)
-    plt.imshow(wordcloud, interpolation="bilinear")
-    plt.axis("off")
-    st.pyplot()
-
-    st.write("Word Frequencies")
-    st.table(word_freq.head(10))
-
-    if st.button('Download Word Cloud'):
-        buffered = io.BytesIO()
-        if file_format == "PNG":
-            plt.savefig(buffered, format="PNG", dpi=resolution)
-            st.download_button(
-                label="Download Word Cloud as PNG",
-                data=buffered,
-                file_name="word_cloud.png",
-                mime="image/png"
-            )
-        elif file_format == "JPEG":
-            plt.savefig(buffered, format="JPEG", dpi=resolution)
-            st.download_button(
-                label="Download Word Cloud as JPEG",
-                data=buffered,
-                file_name="word_cloud.jpeg",
-                mime="image/jpeg"
-            )
-        elif file_format == "SVG":
-            buffered_svg = io.StringIO()
-            plt.savefig(buffered_svg, format="SVG", dpi=resolution)
-            st.download_button(
-                label="Download Word Cloud as SVG",
-                data=buffered_svg.getvalue(),
-                file_name="word_cloud.svg",
-                mime="image/svg+xml"
-            )
-
-    st.write("Connect with me:")
-    social_media = {
-        "LinkedIn": "",
-        "Twitter": "https://twitter.com/aammar_tufail",
-        "Instagram": ""
-    }
+    # Word count table at the end
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Subscribe to our Youtube Channel to learn Data Science in Urdu/Hindi")
+    # add a youtube video
+    st.sidebar.video("https://youtu.be/omk5b1m2h38")
+    st.sidebar.markdown("---")
+    # add author name and info
+    st.sidebar.markdown("Created by: [Dr. Muhammad Aammar Tufail](https://github.com/AammarTufail)")
+    st.sidebar.markdown("Contact: [Email](mailto:aammar@codanics.com)")
     
-    for media, link in social_media.items():
-        st.write(f"{media}: {link}")
-
-# Required installations:
-# pip install streamlit wordcloud pandas python-docx pdfminer.six matplotlib
-
+    
+    st.subheader("Word Count Table")
+    st.write(word_count)
+    # Provide download link for table
+    if st.button('Download Word Count Table as CSV'):
+        st.markdown(get_table_download_link(word_count, "word_count.csv", "Click Here to Download"), unsafe_allow_html=True)
